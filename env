@@ -1,0 +1,3 @@
+BOT_TOKEN=8489704929:AAE7yJRPkvxLjxFfJHr2rhJX6sZLKu-gho8
+DATABASE_URL=sqlite:///workout_bot.db
+LOG_LEVEL=INFO
