@@ -27,12 +27,12 @@ class Reminder(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     reminder_type = Column(String(50), nullable=False)  # once, everyday, days
-    time = Column(String(5), nullable=False)  # HH:MM format
-    days = Column(String(20))  # comma-separated days for 'days' type
+    time = Column(String(5), nullable=False)            # HH:MM
+    days = Column(String(20))                           # 'пн,ср,пт' для type='days'
     text = Column(Text, nullable=False)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    job_id = Column(String(100))  # APScheduler job ID
+    job_id = Column(String(100))                        # APScheduler job ID
 
     user = relationship("User", back_populates="reminders")
 

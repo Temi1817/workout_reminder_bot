@@ -9,20 +9,18 @@ from .config import DATABASE_URL
 
 logger = logging.getLogger(__name__)
 
-# Create engine
+# DB
 engine = create_engine(DATABASE_URL, echo=False)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 def init_db():
-    """Initialize database tables"""
     Base.metadata.create_all(bind=engine)
     logger.info("Database initialized")
 
 
 @contextmanager
 def get_db() -> Generator[Session, None, None]:
-    """Context manager for database sessions"""
     db = SessionLocal()
     try:
         yield db
@@ -33,9 +31,8 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
-def get_or_create_user(telegram_id: int, username: str = None, 
-                      first_name: str = None, last_name: str = None) -> User:
-    """Get existing user or create new one"""
+def get_or_create_user(telegram_id: int, username: str = None,
+                       first_name: str = None, last_name: str = None) -> User:
     with get_db() as db:
         user = db.query(User).filter(User.telegram_id == telegram_id).first()
         if not user:
@@ -50,19 +47,16 @@ def get_or_create_user(telegram_id: int, username: str = None,
             db.refresh(user)
             logger.info(f"Created new user: {telegram_id}")
         else:
-            # Update user info if changed
             if user.username != username or user.first_name != first_name or user.last_name != last_name:
                 user.username = username
                 user.first_name = first_name
                 user.last_name = last_name
                 db.commit()
-        
         return user
 
 
-def create_reminder(user_id: int, reminder_type: str, time: str, 
-                   text: str, days: str = None, job_id: str = None) -> Reminder:
-    """Create new reminder"""
+def create_reminder(user_id: int, reminder_type: str, time: str,
+                    text: str, days: str = None, job_id: str = None) -> Reminder:
     with get_db() as db:
         reminder = Reminder(
             user_id=user_id,
@@ -80,41 +74,56 @@ def create_reminder(user_id: int, reminder_type: str, time: str,
 
 
 def get_active_reminders(user_id: int = None):
-    """Get active reminders for user or all users"""
     with get_db() as db:
-        query = db.query(Reminder).filter(Reminder.is_active == True)
+        q = db.query(Reminder).filter(Reminder.is_active == True)
         if user_id:
-            query = query.filter(Reminder.user_id == user_id)
-        return query.all()
+            q = q.filter(Reminder.user_id == user_id)
+        return q.all()
 
 
 def get_reminder_by_id(reminder_id: int, user_id: int = None):
-    """Get reminder by ID, optionally filtered by user"""
+    """Возвращает ТОЛЬКО активное напоминание (чтобы нельзя было удалять повторно)."""
     with get_db() as db:
-        query = db.query(Reminder).filter(Reminder.id == reminder_id)
+        q = db.query(Reminder).filter(
+            Reminder.id == reminder_id,
+            Reminder.is_active == True
+        )
         if user_id:
-            query = query.filter(Reminder.user_id == user_id)
-        return query.first()
+            q = q.filter(Reminder.user_id == user_id)
+        return q.first()
 
 
 def delete_reminder(reminder_id: int, user_id: int = None) -> bool:
-    """Delete reminder"""
+    """Жёсткое удаление записи из БД."""
     with get_db() as db:
-        query = db.query(Reminder).filter(Reminder.id == reminder_id)
+        q = db.query(Reminder).filter(Reminder.id == reminder_id)
         if user_id:
-            query = query.filter(Reminder.user_id == user_id)
-        
-        reminder = query.first()
-        if reminder:
-            reminder.is_active = False
-            db.commit()
-            logger.info(f"Deleted reminder {reminder_id}")
-            return True
-        return False
+            q = q.filter(Reminder.user_id == user_id)
+        r = q.first()
+        if not r:
+            return False
+        db.delete(r)
+        db.commit()
+        logger.info(f"Hard-deleted reminder {reminder_id}")
+        return True
+
+
+def rename_reminder(reminder_id: int, user_id: int, new_text: str) -> bool:
+    """Переименовать активное напоминание."""
+    with get_db() as db:
+        r = db.query(Reminder).filter(
+            Reminder.id == reminder_id,
+            Reminder.user_id == user_id,
+            Reminder.is_active == True
+        ).first()
+        if not r:
+            return False
+        r.text = new_text
+        db.commit()
+        return True
 
 
 def mark_workout_completed(reminder_id: int, user_id: int, text: str = None):
-    """Mark workout as completed"""
     with get_db() as db:
         completed = CompletedWorkout(
             user_id=user_id,
@@ -127,23 +136,37 @@ def mark_workout_completed(reminder_id: int, user_id: int, text: str = None):
 
 
 def get_user_stats(user_id: int, days: int = 7):
-    """Get user workout statistics for last N days"""
     from datetime import datetime, timedelta
-    
     with get_db() as db:
         start_date = datetime.utcnow() - timedelta(days=days)
         completed_workouts = db.query(CompletedWorkout).filter(
             CompletedWorkout.user_id == user_id,
             CompletedWorkout.completed_at >= start_date
         ).count()
-        
         total_reminders = db.query(Reminder).filter(
             Reminder.user_id == user_id,
             Reminder.is_active == True
         ).count()
-        
         return {
             'completed_workouts': completed_workouts,
             'total_reminders': total_reminders,
             'days': days
         }
+
+# --- ВНИЗУ db.py рядом с другими функциями ---
+
+def set_reminder_inactive(reminder_id: int) -> None:
+    """Пометить напоминание неактивным (для одноразовых после отправки)."""
+    with get_db() as db:
+        r = db.query(Reminder).filter(Reminder.id == reminder_id).first()
+        if r and r.is_active:
+            r.is_active = False
+            db.commit()
+
+def get_any_reminder_by_id(reminder_id: int, user_id: int = None):
+    """Ищет напоминание без фильтра is_active (нужно для колбэка после once)."""
+    with get_db() as db:
+        q = db.query(Reminder).filter(Reminder.id == reminder_id)
+        if user_id:
+            q = q.filter(Reminder.user_id == user_id)
+        return q.first()
