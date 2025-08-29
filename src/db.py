@@ -201,28 +201,22 @@ def finalize_past_weeks(user_id: int, tz_str: str = "Asia/Almaty") -> int:
 
     tz = pytz.timezone(tz_str)
     today = datetime.now(tz).date()
-    # понедельник текущей недели
     this_monday = today - timedelta(days=today.weekday())
 
-    # какие недели уже сохранены
     with get_db() as db:
         existing = db.query(WeeklySummary).filter(WeeklySummary.user_id == user_id).all()
-    have = set()
-    for w in existing:
-        ws_local = w.week_start.replace(tzinfo=pytz.utc).astimezone(tz).date()
-        have.add(ws_local)
+    have = {w.week_start.date() for w in existing}
 
     created = 0
-    # пробежимся от ~12 недель назад до текущей
+    # пробежимся за последние 12 недель
     start = this_monday - timedelta(weeks=12)
     cur = start
     while cur < this_monday:
         if cur not in have:
             week_days = [cur + timedelta(days=i) for i in range(7)]
             week_end_date = week_days[-1]
-            # неделя завершена, если её воскресенье < this_monday
-            if week_end_date < this_monday:
-                # Считаем план и done
+
+            if week_end_date < this_monday:  # неделя завершена
                 done_total = 0
                 planned_total = 0
 
@@ -266,8 +260,8 @@ def finalize_past_weeks(user_id: int, tz_str: str = "Asia/Almaty") -> int:
 
 def get_week_summaries(user_id: int, tz_str: str = "Asia/Almaty"):
     """
-    Вернёт все недельные итоги пользователя, отсортированные по дате начала (возр.).
-    Формат элементов:
+    Вернёт все недельные итоги пользователя.
+    Формат:
     {"range": "12.08–18.08", "done": 55, "planned": 56, "pct": 98}
     """
     import pytz
@@ -289,6 +283,7 @@ def get_week_summaries(user_id: int, tz_str: str = "Asia/Almaty"):
             "pct": pct
         })
     return out
+
 
 
 

@@ -567,6 +567,39 @@ async def handle_done_callback(callback: CallbackQuery):
         logger.exception("Error in done callback: %s", e)
         await callback.answer("❌ Ошибка.", show_alert=True)
 
+@dp.message(Command("weeks"))
+async def weeks_command(message: Message):
+    """
+    Показывает недельные итоги:
+    1) 12.08–18.08 — 55/56 (98%)
+    2) 19.08–25.08 — 50/56 (89%)
+    ...
+    """
+    try:
+        user = get_or_create_user(
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name
+        )
+
+        from .db import finalize_past_weeks, get_week_summaries
+        finalize_past_weeks(user.id, tz_str=TIMEZONE)
+        weeks = get_week_summaries(user.id, tz_str=TIMEZONE)
+
+        if not weeks:
+            await message.answer("🗂 Пока нет недельных итогов. Дай хотя бы одной неделе завершиться 😉")
+            return
+
+        lines = ["🗂 Недельные итоги:\n"]
+        for i, w in enumerate(weeks, start=1):
+            lines.append(f"{i}) {w['range']} — {w['done']}/{w['planned']} ({w['pct']}%)")
+
+        await message.answer("\n".join(lines))
+    except Exception as e:
+        logger.exception("Error in /weeks: %s", e)
+        await message.answer("❌ Ошибка при получении недельных итогов.")
+
 
 @dp.message()
 async def handle_unknown_command(message: Message):
