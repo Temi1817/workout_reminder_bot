@@ -66,17 +66,4 @@ class WeeklySummary(Base):
 
     user = relationship("User")
 
-class WeeklySummary(Base):
-    __tablename__ = "weekly_summaries"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-
-    week_start = Column(DateTime, nullable=False)  # понедельник 00:00 (UTC)
-    week_end   = Column(DateTime, nullable=False)  # воскресенье 23:59:59 (UTC)
-
-    done_total = Column(Integer, default=0, nullable=False)
-    planned_total = Column(Integer, default=0, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    user = relationship("User")

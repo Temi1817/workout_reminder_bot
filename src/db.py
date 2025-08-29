@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from typing import Generator
 import logging
 
-from .models import Base, User, Reminder, CompletedWorkout
+from .models import Base, User, Reminder, CompletedWorkout, WeeklySummary
 from .config import DATABASE_URL
 
 logger = logging.getLogger(__name__)
