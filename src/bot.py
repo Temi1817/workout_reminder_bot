@@ -386,6 +386,14 @@ async def mark_done_command(message: Message):
 
 @dp.message(Command("stats"))
 async def stats_command(message: Message):
+    """
+    Статистика за 7 дней:
+    - по дням: 'ДД.ММ.ГГГГ — X из Y' + прогресс-бар + ✅ для 100%
+    - лучший и слабый день
+    - текущая серия 100%-дней (streak)
+    - среднее выполнение за день
+    - активные напоминания сейчас
+    """
     try:
         user = get_or_create_user(
             telegram_id=message.from_user.id,
@@ -394,27 +402,139 @@ async def stats_command(message: Message):
             last_name=message.from_user.last_name
         )
 
-        stats = get_user_stats(user.id, days=7)
-        text = (
-            f"📊 Статистика за {stats['days']} дней:\n\n"
-            f"✅ Выполнено тренировок: {stats['completed_workouts']}\n"
-            f"🔔 Активных напоминаний: {stats['total_reminders']}\n\n"
-        )
+        # Посуточные данные за 7 дней (сегодня, вчера, ...)
+        from .db import get_daily_7d_ratio, get_active_reminders
+        items = get_daily_7d_ratio(user.id, tz_str=TIMEZONE)
 
-        done = stats['completed_workouts']
-        if done == 0:
-            text += "💪 Время начать тренироваться! Ты можешь это сделать!"
-        elif done < 3:
-            text += "🔥 Неплохое начало! Продолжай в том же духе!"
-        elif done < 7:
-            text += "⭐ Отлично! Ты на правильном пути к цели!"
-        else:
-            text += "🏆 Невероятно! Ты настоящий чемпион!"
+        if not items:
+            await message.answer("📊 Пока нет данных за последние 7 дней. Начнём с первой тренировки! 💪")
+            return
 
-        await message.answer(text)
+        total_done = sum(it["done"] for it in items)
+        total_planned = sum(it["planned"] for it in items)
+        avg_done = total_done / len(items)
+        avg_planned = total_planned / len(items) if len(items) else 0
+        avg_pct = int(round(100 * total_done / total_planned)) if total_planned > 0 else 0
+
+        # Лучший / слабый день (считаем только дни, где есть план)
+        def ratio(it):
+            return (it["done"] / it["planned"]) if it["planned"] > 0 else -1
+        planned_days = [it for it in items if it["planned"] > 0]
+        best_line = max(planned_days, key=ratio) if planned_days else None
+        worst_line = min(planned_days, key=ratio) if planned_days else None
+
+        # Серия 100% от сегодняшнего дня назад (дни без плана пропускаем)
+        streak = 0
+        for it in items:
+            if it["planned"] == 0:
+                continue
+            if it["done"] >= it["planned"]:
+                streak += 1
+            else:
+                break
+
+        # Строки по дням
+        lines = [f"📊 Статистика за {len(items)} дней:\n"]
+        for it in items:
+            planned = it["planned"]
+            done = it["done"]
+            if planned > 0:
+                r = done / planned
+                units = max(1, int(round(min(1.0, r) * 10)))  # 1..10
+                bar = "▮" * units
+            else:
+                bar = "—"
+            suffix = " ✅" if planned > 0 and done >= planned else ""
+            lines.append(f"🗓 {it['date']} — {done} из {planned}   {bar}{suffix}")
+
+        # Итоги
+        lines.append("\nИтого за неделю:")
+        lines.append(f"✅ Выполнено: {total_done}")
+        lines.append(f"🎯 План: {total_planned}")
+        if total_planned > 0:
+            lines.append(f"📈 Выполнение: {avg_pct}%")
+
+        # Средние за день
+        lines.append(f"\n📊 Среднее за день: {avg_done:.1f} из {avg_planned:.1f}")
+
+        # Лучший / сложный день
+        if best_line:
+            bpct = int(round(100 * best_line["done"] / best_line["planned"])) if best_line["planned"] else 0
+            lines.append(f"🌟 Лучший день: {best_line['date']} — {best_line['done']}/{best_line['planned']} ({bpct}%)")
+        if worst_line and worst_line is not best_line:
+            wpct = int(round(100 * worst_line["done"] / worst_line["planned"])) if worst_line["planned"] else 0
+            lines.append(f"⚠️ Сложный день: {worst_line['date']} — {worst_line['done']}/{worst_line['planned']} ({wpct}%)")
+
+        # Серия 100%
+        if streak > 0:
+            lines.append(f"🔥 Серия 100% дней подряд: {streak}")
+
+        # Активные напоминания сейчас
+        active_now = len(get_active_reminders(user_id=user.id))
+        lines.append(f"\n🔔 Активных напоминаний сейчас: {active_now}")
+
+        # Мотивашка
+        if total_planned > 0:
+            if avg_pct >= 95:
+                lines.append("\n🏆 Ты машина! Держи этот космический темп!")
+            elif avg_pct >= 80:
+                lines.append("\n⭐ Отличный прогресс! Чуть-чуть — и будет 100% 😉")
+            elif avg_pct >= 50:
+                lines.append("\n💪 Неплохо! Пора поднять планку ещё на шаг!")
+            else:
+                lines.append("\n🚀 Начало положено — сегодня отличный день сделать +1!")
+
+        await message.answer("\n".join(lines))
     except Exception as e:
         logger.exception("Error in /stats: %s", e)
         await message.answer("❌ Ошибка при получении статистики.")
+
+@dp.message(Command("weeks"))
+async def weeks_command(message: Message):
+    """
+    Показывает недельные итоги (с нумерацией):
+    1) 12.08–18.08 — 55/56 (98%)
+    2) 19.08–25.08 — 50/56 (89%)
+    ...
+    По умолчанию выводит до 12 недель. Можно: /weeks 20
+    """
+    try:
+        user = get_or_create_user(
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+            last_name=message.from_user.last_name
+        )
+
+        parts = message.text.split()
+        limit = 12
+        if len(parts) == 2:
+            try:
+                limit = max(1, min(52, int(parts[1])))
+            except ValueError:
+                pass
+
+        from .db import finalize_past_weeks, get_week_summaries
+        # На всякий случай перед показом пересчитаем незакрытые прошлые недели
+        finalize_past_weeks(user.id, tz_str=TIMEZONE)
+
+        weeks = get_week_summaries(user.id, tz_str=TIMEZONE)
+        if not weeks:
+            await message.answer("🗂 Пока нет недельных итогов. Дай хотя бы одной неделе завершиться 😉")
+            return
+
+        # Нумерация с 1 от самой ранней недели
+        if len(weeks) > limit:
+            weeks = weeks[-limit:]
+
+        lines = ["🗂 Недельные итоги:\n"]
+        for i, w in enumerate(weeks, start=1):
+            lines.append(f"{i}) {w['range']} — {w['done']}/{w['planned']} ({w['pct']}%)")
+
+        await message.answer("\n".join(lines))
+    except Exception as e:
+        logger.exception("Error in /weeks: %s", e)
+        await message.answer("❌ Ошибка при получении недельных итогов.")
 
 
 @dp.callback_query(F.data.startswith("done_"))

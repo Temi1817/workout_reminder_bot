@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey, Text, Date
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -48,3 +48,21 @@ class CompletedWorkout(Base):
 
     user = relationship("User", back_populates="completed_workouts")
     reminder = relationship("Reminder")
+    
+     
+
+class WeeklySummary(Base):
+    __tablename__ = "weekly_summaries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    week_start = Column(DateTime, nullable=False)  # понедельник 00:00 (UTC)
+    week_end   = Column(DateTime, nullable=False)  # воскресенье 23:59:59 (UTC)
+
+    done_total = Column(Integer, default=0, nullable=False)
+    planned_total = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User")
+

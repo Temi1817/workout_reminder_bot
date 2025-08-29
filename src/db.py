@@ -170,3 +170,162 @@ def get_any_reminder_by_id(reminder_id: int, user_id: int = None):
         if user_id:
             q = q.filter(Reminder.user_id == user_id)
         return q.first()
+
+def _planned_for_day(user_id: int, day_local_date, tz_str: str = "Asia/Almaty") -> int:
+    """План на конкретный день: active 'everyday' + active 'days' совпадающего weekday."""
+    ru_days = ['пн','вт','ср','чт','пт','сб','вс']
+    ru = ru_days[day_local_date.weekday()]
+    with get_db() as db:
+        rems = db.query(Reminder).filter(
+            Reminder.user_id == user_id,
+            Reminder.is_active == True
+        ).all()
+    y = 0
+    for r in rems:
+        if r.reminder_type == "everyday":
+            y += 1
+        elif r.reminder_type == "days" and r.days:
+            parts = [p.strip().lower() for p in r.days.split(",") if p.strip()]
+            if ru in parts:
+                y += 1
+    return y
+
+
+def finalize_past_weeks(user_id: int, tz_str: str = "Asia/Almaty") -> int:
+    """
+    Для всех завершённых недель (пн–вс), по которым ещё нет записи,
+    посчитать и сохранить итог (done/planned). Возвращает кол-во созданных итогов.
+    """
+    from datetime import datetime, timedelta
+    import pytz
+
+    tz = pytz.timezone(tz_str)
+    today = datetime.now(tz).date()
+    # понедельник текущей недели
+    this_monday = today - timedelta(days=today.weekday())
+
+    # какие недели уже сохранены
+    with get_db() as db:
+        existing = db.query(WeeklySummary).filter(WeeklySummary.user_id == user_id).all()
+    have = set()
+    for w in existing:
+        ws_local = w.week_start.replace(tzinfo=pytz.utc).astimezone(tz).date()
+        have.add(ws_local)
+
+    created = 0
+    # пробежимся от ~12 недель назад до текущей
+    start = this_monday - timedelta(weeks=12)
+    cur = start
+    while cur < this_monday:
+        if cur not in have:
+            week_days = [cur + timedelta(days=i) for i in range(7)]
+            week_end_date = week_days[-1]
+            # неделя завершена, если её воскресенье < this_monday
+            if week_end_date < this_monday:
+                # Считаем план и done
+                done_total = 0
+                planned_total = 0
+
+                week_start_local = datetime(cur.year, cur.month, cur.day, 0, 0, 0, tzinfo=tz)
+                week_end_local   = datetime(week_end_date.year, week_end_date.month, week_end_date.day, 23, 59, 59, tzinfo=tz)
+                week_start_utc = week_start_local.astimezone(pytz.utc)
+                week_end_utc   = week_end_local.astimezone(pytz.utc)
+
+                with get_db() as db:
+                    done_rows = db.query(CompletedWorkout).filter(
+                        CompletedWorkout.user_id == user_id,
+                        CompletedWorkout.completed_at >= week_start_utc,
+                        CompletedWorkout.completed_at <= week_end_utc
+                    ).all()
+
+                import pytz as _pytz
+                dm = {}
+                for r in done_rows:
+                    dt_local = r.completed_at.replace(tzinfo=_pytz.utc).astimezone(tz)
+                    dd = dt_local.date()
+                    dm[dd] = dm.get(dd, 0) + 1
+
+                for d in week_days:
+                    planned_total += _planned_for_day(user_id, d, tz_str)
+                    done_total += dm.get(d, 0)
+
+                with get_db() as db:
+                    ws = WeeklySummary(
+                        user_id=user_id,
+                        week_start=week_start_utc,
+                        week_end=week_end_utc,
+                        done_total=done_total,
+                        planned_total=planned_total
+                    )
+                    db.add(ws)
+                    db.commit()
+                created += 1
+        cur += timedelta(weeks=1)
+    return created
+
+
+def get_week_summaries(user_id: int, tz_str: str = "Asia/Almaty"):
+    """
+    Вернёт все недельные итоги пользователя, отсортированные по дате начала (возр.).
+    Формат элементов:
+    {"range": "12.08–18.08", "done": 55, "planned": 56, "pct": 98}
+    """
+    import pytz
+    tz = pytz.timezone(tz_str)
+    with get_db() as db:
+        rows = db.query(WeeklySummary)\
+                 .filter(WeeklySummary.user_id == user_id)\
+                 .order_by(WeeklySummary.week_start.asc())\
+                 .all()
+    out = []
+    for w in rows:
+        ws = w.week_start.replace(tzinfo=pytz.utc).astimezone(tz).date()
+        we = w.week_end.replace(tzinfo=pytz.utc).astimezone(tz).date()
+        pct = int(round(100 * w.done_total / w.planned_total)) if w.planned_total > 0 else 0
+        out.append({
+            "range": f"{ws.strftime('%d.%m')}–{we.strftime('%d.%m')}",
+            "done": w.done_total,
+            "planned": w.planned_total,
+            "pct": pct
+        })
+    return out
+
+
+
+def get_daily_7d_ratio(user_id: int, tz_str: str = "Asia/Almaty"):
+    """
+    Возвращает список на 7 дней (сегодня и 6 прошлых) в порядке: сегодня, вчера, ...
+      [{"date":"ДД.ММ.ГГГГ","done":X,"planned":Y}, ...]
+    """
+    from datetime import datetime, timedelta
+    import pytz
+
+    tz = pytz.timezone(tz_str)
+    now_local = datetime.now(tz)
+    today0 = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # отметки DONE за последние 7 дней
+    start_local = today0 - timedelta(days=6)
+    start_utc = start_local.astimezone(pytz.utc)
+
+    with get_db() as db:
+        rows = db.query(CompletedWorkout).filter(
+            CompletedWorkout.user_id == user_id,
+            CompletedWorkout.completed_at >= start_utc
+        ).all()
+
+    done_map = {}
+    for r in rows:
+        dt_local = r.completed_at.replace(tzinfo=pytz.utc).astimezone(tz)
+        d = dt_local.date()
+        done_map[d] = done_map.get(d, 0) + 1
+
+    out = []
+    for i in range(7):
+        d = (today0 - timedelta(days=i)).date()
+        out.append({
+            "date": d.strftime("%d.%m.%Y"),
+            "done": done_map.get(d, 0),
+            "planned": _planned_for_day(user_id, d, tz_str)
+        })
+    return out
