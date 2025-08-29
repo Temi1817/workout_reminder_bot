@@ -193,38 +193,76 @@ def _planned_for_day(user_id: int, day_local_date, tz_str: str = "Asia/Almaty") 
 
 def finalize_past_weeks(user_id: int, tz_str: str = "Asia/Almaty") -> int:
     """
-    Для всех завершённых недель (пн–вс), по которым ещё нет записи,
-    посчитать и сохранить итог (done/planned). Возвращает кол-во созданных итогов.
+    Сводит недели (пн–вс) ТОЛЬКО с момента первой активности пользователя.
+    Не сохраняет пустые недели 0/0.
+    Возвращает, сколько итогов создано.
     """
     from datetime import datetime, timedelta
     import pytz
 
     tz = pytz.timezone(tz_str)
     today = datetime.now(tz).date()
-    this_monday = today - timedelta(days=today.weekday())
+    this_monday = today - timedelta(days=today.weekday())  # понедельник текущей недели
 
+    # ---- 1) Находим дату старта пользователя ----
+    with get_db() as db:
+        # дата создания юзера (UTC)
+        user = db.query(User).filter(User.id == user_id).first()
+
+        # самое раннее напоминание (UTC)
+        first_rem = db.query(Reminder)\
+            .filter(Reminder.user_id == user_id)\
+            .order_by(Reminder.created_at.asc())\
+            .first()
+
+        # самое раннее выполнение (UTC)
+        first_done = db.query(CompletedWorkout)\
+            .filter(CompletedWorkout.user_id == user_id)\
+            .order_by(CompletedWorkout.completed_at.asc())\
+            .first()
+
+    candidates = []
+    if user and user.created_at:
+        # created_at в UTC -> локальная дата
+        candidates.append(user.created_at.replace(tzinfo=pytz.utc).astimezone(tz).date())
+    if first_rem and first_rem.created_at:
+        candidates.append(first_rem.created_at.replace(tzinfo=pytz.utc).astimezone(tz).date())
+    if first_done and first_done.completed_at:
+        candidates.append(first_done.completed_at.replace(tzinfo=pytz.utc).astimezone(tz).date())
+
+    if not candidates:
+        # никакой активности ещё не было — нечего сводить
+        return 0
+
+    start_date = min(candidates)
+    start_monday = start_date - timedelta(days=start_date.weekday())  # округляем влево до понедельника
+
+    # ---- 2) Узнаём какие недели уже сохранены ----
     with get_db() as db:
         existing = db.query(WeeklySummary).filter(WeeklySummary.user_id == user_id).all()
-    have = {w.week_start.date() for w in existing}
 
+    have = set()
+    for w in existing:
+        ws_local = w.week_start.replace(tzinfo=pytz.utc).astimezone(tz).date()
+        have.add(ws_local)  # локальная дата понедельника
+
+    # ---- 3) Считаем и сохраняем новые недели ----
     created = 0
-    # пробежимся за последние 12 недель
-    start = this_monday - timedelta(weeks=12)
-    cur = start
+    cur = start_monday
     while cur < this_monday:
         if cur not in have:
             week_days = [cur + timedelta(days=i) for i in range(7)]
             week_end_date = week_days[-1]
 
-            if week_end_date < this_monday:  # неделя завершена
-                done_total = 0
-                planned_total = 0
-
+            # неделя завершена, если её воскресенье < this_monday
+            if week_end_date < this_monday:
+                # границы недели в локали -> UTC
                 week_start_local = datetime(cur.year, cur.month, cur.day, 0, 0, 0, tzinfo=tz)
                 week_end_local   = datetime(week_end_date.year, week_end_date.month, week_end_date.day, 23, 59, 59, tzinfo=tz)
                 week_start_utc = week_start_local.astimezone(pytz.utc)
                 week_end_utc   = week_end_local.astimezone(pytz.utc)
 
+                # DONE внутри этой недели
                 with get_db() as db:
                     done_rows = db.query(CompletedWorkout).filter(
                         CompletedWorkout.user_id == user_id,
@@ -232,17 +270,24 @@ def finalize_past_weeks(user_id: int, tz_str: str = "Asia/Almaty") -> int:
                         CompletedWorkout.completed_at <= week_end_utc
                     ).all()
 
-                import pytz as _pytz
+                # считаем done по дням (в локальной TZ)
                 dm = {}
                 for r in done_rows:
-                    dt_local = r.completed_at.replace(tzinfo=_pytz.utc).astimezone(tz)
+                    dt_local = r.completed_at.replace(tzinfo=pytz.utc).astimezone(tz)
                     dd = dt_local.date()
                     dm[dd] = dm.get(dd, 0) + 1
 
+                planned_total, done_total = 0, 0
                 for d in week_days:
                     planned_total += _planned_for_day(user_id, d, tz_str)
                     done_total += dm.get(d, 0)
 
+                # Не сохраняем пустую неделю 0/0
+                if planned_total == 0 and done_total == 0:
+                    cur += timedelta(weeks=1)
+                    continue
+
+                # сохраняем
                 with get_db() as db:
                     ws = WeeklySummary(
                         user_id=user_id,
@@ -254,9 +299,10 @@ def finalize_past_weeks(user_id: int, tz_str: str = "Asia/Almaty") -> int:
                     db.add(ws)
                     db.commit()
                 created += 1
-        cur += timedelta(weeks=1)
-    return created
 
+        cur += timedelta(weeks=1)
+
+    return created
 
 def get_week_summaries(user_id: int, tz_str: str = "Asia/Almaty"):
     """

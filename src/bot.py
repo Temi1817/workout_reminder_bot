@@ -86,6 +86,7 @@ async def start_command(message: Message):
         "• /delete ID — удалить\n"
         "• /done ID — отметить выполненным\n"
         "• /stats — статистика за 7 дней\n\n"
+        "• /weeks [N] — недельные итоги (последние N недель, по умолчанию 8)\n\n"
         "Пример: /add 18:00 Тренировка в спортзале 💪"
     )
 
@@ -566,14 +567,14 @@ async def handle_done_callback(callback: CallbackQuery):
     except Exception as e:
         logger.exception("Error in done callback: %s", e)
         await callback.answer("❌ Ошибка.", show_alert=True)
-
 @dp.message(Command("weeks"))
 async def weeks_command(message: Message):
     """
-    Показывает недельные итоги:
-    1) 12.08–18.08 — 55/56 (98%)
-    2) 19.08–25.08 — 50/56 (89%)
-    ...
+    Красивые недельные итоги:
+    - бейдж по качеству (🏆/🥇/🥈/🥉/💪/🙂/💤)
+    - прогресс-бар ▮▯ (10 делений)
+    - по умолчанию показываем последние 8 недель, можно /weeks 12
+    - свежие недели сверху
     """
     try:
         user = get_or_create_user(
@@ -583,19 +584,81 @@ async def weeks_command(message: Message):
             last_name=message.from_user.last_name
         )
 
+        # --- парсим лимит (например: /weeks 12) ---
+        parts = message.text.split()
+        limit = 8
+        if len(parts) == 2:
+            try:
+                limit = max(1, min(52, int(parts[1])))
+            except ValueError:
+                pass
+
         from .db import finalize_past_weeks, get_week_summaries
+        # пересчитаем незакрытые недели и достанем сводку
         finalize_past_weeks(user.id, tz_str=TIMEZONE)
         weeks = get_week_summaries(user.id, tz_str=TIMEZONE)
 
         if not weeks:
-            await message.answer("🗂 Пока нет недельных итогов. Дай хотя бы одной неделе завершиться 😉")
+            await message.answer("🗂 Пока нет недельных итогов — начнём с первой недели! 💪")
             return
 
-        lines = ["🗂 Недельные итоги:\n"]
-        for i, w in enumerate(weeks, start=1):
-            lines.append(f"{i}) {w['range']} — {w['done']}/{w['planned']} ({w['pct']}%)")
+        # оставляем последние N и показываем свежие сверху
+        if len(weeks) > limit:
+            weeks = weeks[-limit:]
+        weeks = list(reversed(weeks))
 
-        await message.answer("\n".join(lines))
+        def badge(pct: int) -> str:
+            if pct >= 100:
+                return "🏆"
+            if pct >= 95:
+                return "🥇"
+            if pct >= 85:
+                return "🥈"
+            if pct >= 70:
+                return "🥉"
+            if pct >= 50:
+                return "💪"
+            if pct > 0:
+                return "🙂"
+            return "💤"
+
+        def bar(pct: int) -> str:
+            filled = max(0, min(10, int(round(pct / 10))))
+            return "▮" * filled + "▯" * (10 - filled)
+
+        lines = ["🗂 *Недельные итоги*:\n"]
+        total_done = 0
+        total_plan = 0
+
+        for i, w in enumerate(weeks, start=1):
+            total_done += w["done"]
+            total_plan += w["planned"]
+            b = badge(w["pct"])
+            lines.append(
+                f"{i}) {b} {w['range']} — *{w['done']}/{w['planned']}* ({w['pct']}%)   {bar(w['pct'])}"
+            )
+
+        # мини-сводка по показанным неделям
+        lines.append("")
+        lines.append("———")
+        if total_plan > 0:
+            avg_pct = int(round(100 * total_done / total_plan))
+            lines.append(f"📈 *Среднее по {len(weeks)} неделям:* {total_done}/{total_plan} ({avg_pct}%)")
+            # мотивашка
+            if avg_pct >= 95:
+                lines.append("🏆 Ты на пике формы — космос!")
+            elif avg_pct >= 85:
+                lines.append("🥇 Очень мощно! Держи темп.")
+            elif avg_pct >= 70:
+                lines.append("🥉 Стабильный прогресс, ещё чуточку!")
+            elif avg_pct >= 50:
+                lines.append("💪 Хорошее движение — можно больше!")
+            else:
+                lines.append("🚀 Старт дан. Эта неделя — твоя!")
+        else:
+            lines.append(f"📈 По показанным неделям пока нет запланированных целей.")
+
+        await message.answer("\n".join(lines), parse_mode="Markdown")
     except Exception as e:
         logger.exception("Error in /weeks: %s", e)
         await message.answer("❌ Ошибка при получении недельных итогов.")
